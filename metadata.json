@@ -1,0 +1,7 @@
+{
+  "name": "Celestial Trace: Radiant Particle Art",
+  "description": "An interactive particle simulation where bright, glowing particles follow your finger or motion to create stunning, ethereal patterns. Features dynamic physics, camera tracking, and Gemini-powered creative interpretation.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
