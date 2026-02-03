@@ -33,19 +33,19 @@ export const THEMES: Record<Theme, ThemeColors> = {
     palette: ['#0891b2', '#0e7490', '#c026d3', '#a21caf', '#701a75']
   },
   [Theme.SPARKLE]: {
-    primary: '#fffbeb',
-    secondary: '#fbbf24',
+    primary: '#ffffff',
+    secondary: '#ffaa00',
     background: '#000000',
-    palette: ['#fbbf24', '#f59e0b', '#d97706', '#b45309', '#78350f', '#450a0a']
+    palette: ['#ffffff', '#fff5cc', '#ffcc00', '#ff9900', '#ff6600', '#cc3300', '#220500']
   }
 };
 
 export const DEFAULT_CONFIG: ParticleConfig = {
-  size: 1.6,
-  density: 20, // Reduced density
-  decay: 0.97, // Slightly faster decay than before but still long-lasting
-  speed: 3.0,
-  gravity: 0.08,
+  size: 2.2, 
+  density: 50, 
+  decay: 0.9, // 稍微加快粒子生命周期衰减
+  speed: 7.5,  
+  gravity: 0.3, 
   glow: true,
-  trailPersistence: 0.18 // Increased: higher value means faster background clearing = darker screen
+  trailPersistence: 0.9 // 默认更强劲的背景清理
 };

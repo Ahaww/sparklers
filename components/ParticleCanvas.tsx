@@ -1,5 +1,5 @@
 
-import React, { useRef, useEffect, useState } from 'react';
+import React, { useRef, useEffect } from 'react';
 import { ParticleConfig, ThemeColors, Theme } from '../types';
 
 interface ParticleCanvasProps {
@@ -20,54 +20,62 @@ class Particle {
   size: number;
   theme: Theme;
   color: string;
+  isSpark: boolean;
 
-  constructor(x: number, y: number, theme: Theme, palette: string[], speed: number, size: number) {
+  constructor(x: number, y: number, theme: Theme, palette: string[], speed: number, size: number, isSpark = true) {
     this.x = x;
     this.y = y;
     this.theme = theme;
+    this.isSpark = isSpark;
+    
     const angle = Math.random() * Math.PI * 2;
-    const velocity = (Math.random() * speed * 0.4) + (theme === Theme.SPARKLE ? 0.5 : 0.2);
+    const velocity = isSpark ? (Math.random() * speed + 1.5) : (Math.random() * 0.3);
     this.vx = Math.cos(angle) * velocity;
-    this.vy = Math.sin(angle) * velocity - (theme === Theme.SPARKLE ? 0.2 : 0);
+    this.vy = Math.sin(angle) * velocity;
+    
     this.life = 1.0;
-    this.decayRate = 0.96 + Math.random() * 0.03; 
-    this.size = size * (0.3 + Math.random() * 0.5);
+    this.decayRate = isSpark ? (0.86 + Math.random() * 0.1) : (0.92 + Math.random() * 0.05);
+    this.size = size * (isSpark ? (0.15 + Math.random() * 0.6) : (0.7 + Math.random() * 0.3));
     this.color = palette[Math.floor(Math.random() * palette.length)];
   }
 
   update(configDecay: number, gravity: number) {
-    this.vx *= 0.95; 
-    this.vy *= 0.95;
-    this.vy += gravity;
+    const drag = this.isSpark ? 0.92 : 0.97;
+    this.vx *= drag;
+    this.vy *= drag;
+    
+    this.vy += gravity * (this.isSpark ? 1.0 : 0.1);
     this.x += this.vx;
     this.y += this.vy;
-    this.life *= (configDecay * this.decayRate); 
+    
+    this.life *= Math.min(this.decayRate, configDecay);
     return this.life > 0.01;
   }
 
   getSparkleColor() {
-    // Highly desaturated and darker tones for the sparkle to avoid "blinding" white
-    if (this.life > 0.85) return 'rgba(230, 200, 100, 0.6)';
-    if (this.life > 0.5) return 'rgba(180, 120, 40, 0.4)';
-    return 'rgba(80, 30, 10, 0.2)';
+    const l = this.life;
+    if (l > 0.8) return `rgba(255, 255, 255, 1.0)`; 
+    if (l > 0.4) return `rgba(255, 200, 50, ${l})`; 
+    if (l > 0.15) return `rgba(180, 60, 0, ${l * 0.6})`; 
+    return `rgba(0, 0, 0, 0)`;
   }
 
   draw(ctx: CanvasRenderingContext2D, glow: boolean) {
     const isSparkle = this.theme === Theme.SPARKLE;
     const drawColor = isSparkle ? this.getSparkleColor() : this.color;
     
+    if (isSparkle && this.life < 0.1) return;
+
     ctx.beginPath();
-    ctx.arc(this.x, this.y, this.size * Math.sqrt(this.life), 0, Math.PI * 2);
-    ctx.fillStyle = drawColor;
+    const currentSize = this.size * Math.pow(this.life, 0.9);
+    ctx.arc(this.x, this.y, Math.max(0.01, currentSize), 0, Math.PI * 2);
     
-    // Minimal opacity: individual particles are almost invisible, only group motion shines softly
-    const baseAlpha = isSparkle ? 0.2 : 0.12;
-    ctx.globalAlpha = Math.min(1, this.life * baseAlpha);
+    ctx.fillStyle = drawColor;
+    ctx.globalAlpha = isSparkle ? 1.0 : Math.min(1, this.life * 0.7);
     ctx.fill();
 
-    if (glow && this.life > 0.8) {
-      // Extremely tight glow, almost invisible spread
-      ctx.shadowBlur = isSparkle ? 1.0 : 0.5;
+    if (glow && this.life > 0.75) {
+      ctx.shadowBlur = this.isSpark ? 0.5 : 3;
       ctx.shadowColor = drawColor;
     } else {
       ctx.shadowBlur = 0;
@@ -80,27 +88,31 @@ const ParticleCanvas: React.FC<ParticleCanvasProps> = ({ config, colors, current
   const videoRef = useRef<HTMLVideoElement>(null);
   const processingCanvasRef = useRef<HTMLCanvasElement>(null);
   const particlesRef = useRef<Particle[]>([]);
-  const pointerRef = useRef({ x: -100, y: -100, isDown: false, lastX: -100, lastY: -100 });
-  const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
-  const [trackMarker, setTrackMarker] = useState({ x: 0, y: 0, active: false });
   
-  const PROC_WIDTH = 48;
+  const pointerRef = useRef({ 
+    x: -100, y: -100, 
+    lastX: -100, lastY: -100,
+    isDown: false,
+    confidence: 0 
+  });
+  
+  const prevFrameRef = useRef<Uint8ClampedArray | null>(null);
+  const trackerPulseRef = useRef(0);
+  const smoothedPos = useRef({ x: -100, y: -100 });
+  const lastRawPos = useRef({ x: -1, y: -1 });
+  
+  const PROC_WIDTH = 48; 
   const PROC_HEIGHT = 36;
+  const SMOOTH_FACTOR = 0.4;
+  const CONFIDENCE_THRESHOLD = 5; 
+  const ACTIVATION_ENERGY = 450; 
 
   useEffect(() => {
-    if (!useCamera) {
-      if (videoRef.current && videoRef.current.srcObject) {
-        const stream = videoRef.current.srcObject as MediaStream;
-        stream.getTracks().forEach(track => track.stop());
-        videoRef.current.srcObject = null;
-      }
-      return;
-    }
-
+    if (!useCamera) return;
     const startCamera = async () => {
       try {
         const stream = await navigator.mediaDevices.getUserMedia({ 
-          video: { width: 320, height: 240, frameRate: 60 } 
+          video: { width: 640, height: 480, frameRate: 60 } 
         });
         if (videoRef.current) {
           videoRef.current.srcObject = stream;
@@ -109,12 +121,17 @@ const ParticleCanvas: React.FC<ParticleCanvasProps> = ({ config, colors, current
       } catch (e) { console.error(e); }
     };
     startCamera();
+    return () => {
+      if (videoRef.current && videoRef.current.srcObject) {
+        (videoRef.current.srcObject as MediaStream).getTracks().forEach(t => t.stop());
+      }
+    };
   }, [useCamera]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d', { alpha: false });
+    const ctx = canvas.getContext('2d', { alpha: true });
     const pCanvas = processingCanvasRef.current;
     const pCtx = pCanvas?.getContext('2d', { willReadFrequently: true });
     if (!ctx || !pCtx || !pCanvas) return;
@@ -123,96 +140,152 @@ const ParticleCanvas: React.FC<ParticleCanvasProps> = ({ config, colors, current
 
     const trackHand = () => {
       if (!useCamera || !videoRef.current || videoRef.current.readyState < 2) return null;
-
+      
       pCtx.save();
       pCtx.scale(-1, 1);
       pCtx.drawImage(videoRef.current, -PROC_WIDTH, 0, PROC_WIDTH, PROC_HEIGHT);
       pCtx.restore();
 
       const data = pCtx.getImageData(0, 0, PROC_WIDTH, PROC_HEIGHT).data;
-      let sumX = 0, sumY = 0, count = 0;
+      const energyMap = new Float32Array(PROC_WIDTH * PROC_HEIGHT);
 
       if (prevFrameRef.current) {
         const prev = prevFrameRef.current;
-        for (let i = 0; i < data.length; i += 24) {
-          const r = data[i], g = data[i+1], b = data[i+2];
-          const brightness = (r + g + b) * 0.333;
-          const diff = Math.abs(r - prev[i]) + Math.abs(g - prev[i+1]) + Math.abs(b - prev[i+2]);
+        for (let i = 0; i < data.length; i += 4) {
+          const diff = Math.abs(data[i] - prev[i]) + Math.abs(data[i+1] - prev[i+1]) + Math.abs(data[i+2] - prev[i+2]);
+          if (diff > 50) energyMap[i >> 2] = diff;
+        }
+      }
+      
+      if (!prevFrameRef.current) prevFrameRef.current = new Uint8ClampedArray(data.length);
+      prevFrameRef.current.set(data);
 
-          const energy = (diff * 0.5) + (brightness > 210 ? brightness * 0.5 : 0);
-          if (energy > 40) {
-            const idx = i >> 2;
-            const x = idx % PROC_WIDTH;
-            const y = (idx / PROC_WIDTH) | 0;
-            sumX += x * energy;
-            sumY += y * energy;
-            count += energy;
+      const blurredMap = new Float32Array(PROC_WIDTH * PROC_HEIGHT);
+      let maxEnergy = 0;
+      let peakX = -1, peakY = -1;
+
+      for (let y = 1; y < PROC_HEIGHT - 1; y++) {
+        for (let x = 1; x < PROC_WIDTH - 1; x++) {
+          const idx = y * PROC_WIDTH + x;
+          let sum = 0;
+          for(let ky = -1; ky <= 1; ky++) {
+            for(let kx = -1; kx <= 1; kx++) {
+              sum += energyMap[(y + ky) * PROC_WIDTH + (x + kx)];
+            }
+          }
+
+          if (lastRawPos.current.x !== -1) {
+            const dx = x - lastRawPos.current.x;
+            const dy = y - lastRawPos.current.y;
+            const distSq = dx * dx + dy * dy;
+            if (distSq < 64) { 
+              sum *= (1.2 - (distSq / 100)); 
+            }
+          }
+
+          blurredMap[idx] = sum;
+          if (sum > maxEnergy) {
+            maxEnergy = sum;
+            peakX = x; peakY = y;
           }
         }
       }
 
-      if (!prevFrameRef.current) prevFrameRef.current = new Uint8ClampedArray(data.length);
-      prevFrameRef.current.set(data);
+      if (maxEnergy > ACTIVATION_ENERGY && peakX !== -1) {
+        pointerRef.current.confidence = Math.min(CONFIDENCE_THRESHOLD, pointerRef.current.confidence + 2);
+        lastRawPos.current = { x: peakX, y: peakY };
+        
+        let sumX = 0, sumY = 0, totalWeight = 0;
+        const rad = 4;
+        for (let dy = -rad; dy <= rad; dy++) {
+          for (let dx = -rad; dx <= rad; dx++) {
+            const tx = peakX + dx, ty = peakY + dy;
+            if (tx >= 0 && tx < PROC_WIDTH && ty >= 0 && ty < PROC_HEIGHT) {
+              const e = blurredMap[ty * PROC_WIDTH + tx];
+              if (e > 200) {
+                const weight = e * e;
+                sumX += tx * weight; sumY += ty * weight; totalWeight += weight;
+              }
+            }
+          }
+        }
 
-      if (count > 150) {
-        const targetX = (sumX / count);
-        const targetY = (sumY / count);
-        setTrackMarker({ x: targetX / PROC_WIDTH * 100, y: targetY / PROC_HEIGHT * 100, active: true });
-        return {
-          x: (targetX / PROC_WIDTH) * canvas.width,
-          y: (targetY / PROC_HEIGHT) * canvas.height
-        };
+        if (totalWeight > 0) {
+          const targetX = (sumX / totalWeight) / PROC_WIDTH * canvas.width;
+          const targetY = (sumY / totalWeight) / PROC_HEIGHT * canvas.height;
+          
+          if (smoothedPos.current.x === -100) {
+            smoothedPos.current = { x: targetX, y: targetY };
+          } else {
+            smoothedPos.current.x += (targetX - smoothedPos.current.x) * SMOOTH_FACTOR;
+            smoothedPos.current.y += (targetY - smoothedPos.current.y) * SMOOTH_FACTOR;
+          }
+          return smoothedPos.current;
+        }
       } else {
-        setTrackMarker(prev => ({ ...prev, active: false }));
+        pointerRef.current.confidence = Math.max(0, pointerRef.current.confidence - 1);
+        if (pointerRef.current.confidence > 0) {
+          return smoothedPos.current;
+        }
+        lastRawPos.current = { x: -1, y: -1 };
       }
+      
       return null;
     };
 
     const loop = () => {
-      // CLEAR LAYER: Source-over ensures we are actually painting black over the light
-      ctx.globalCompositeOperation = 'source-over';
-      ctx.fillStyle = '#000000';
-      ctx.globalAlpha = config.trailPersistence; 
+      ctx.save();
+      ctx.globalCompositeOperation = 'destination-out';
+      ctx.fillStyle = `rgba(255, 255, 255, ${1.1 - config.trailPersistence})`; 
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.globalAlpha = 1.0;
+      ctx.restore();
 
       const pos = trackHand();
-      if (pos) {
-        const snap = 0.95; 
-        pointerRef.current.x = pointerRef.current.x === -100 ? pos.x : pointerRef.current.x * (1 - snap) + pos.x * snap;
-        pointerRef.current.y = pointerRef.current.y === -100 ? pos.y : pointerRef.current.y * (1 - snap) + pos.y * snap;
+      if (pos && (pointerRef.current.confidence > 0)) {
+        pointerRef.current.x = pos.x;
+        pointerRef.current.y = pos.y;
         pointerRef.current.isDown = true;
       } else if (useCamera) {
         pointerRef.current.isDown = false;
+        smoothedPos.current = { x: -100, y: -100 };
       }
 
-      // PARTICLE LAYER: Lighter is good but only if particles are faint
+      if (pointerRef.current.x !== -100 && pointerRef.current.isDown) {
+        trackerPulseRef.current = (trackerPulseRef.current + 0.1) % (Math.PI * 2);
+        const pulseSize = Math.sin(trackerPulseRef.current) * 2 + 12;
+        ctx.save();
+        ctx.beginPath();
+        ctx.arc(pointerRef.current.x, pointerRef.current.y, pulseSize, 0, Math.PI * 2);
+        const visualConfidence = pointerRef.current.confidence / CONFIDENCE_THRESHOLD;
+        ctx.strokeStyle = `rgba(255, 255, 255, ${0.4 * visualConfidence})`;
+        ctx.lineWidth = 1;
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       particlesRef.current = particlesRef.current.filter(p => {
         const alive = p.update(config.decay, config.gravity);
         if (alive) p.draw(ctx, config.glow);
         return alive;
       });
+      ctx.restore();
 
       if (pointerRef.current.isDown) {
         const dX = pointerRef.current.x - pointerRef.current.lastX;
         const dY = pointerRef.current.y - pointerRef.current.lastY;
         const dist = Math.sqrt(dX * dX + dY * dY);
-        const steps = pointerRef.current.lastX === -100 ? 1 : Math.max(1, Math.min(3, Math.floor(dist / 30)));
-        const burst = currentTheme === Theme.SPARKLE ? config.density : config.density * 0.5;
+        
+        const steps = pointerRef.current.lastX === -100 ? 1 : Math.max(1, Math.min(15, Math.floor(dist / 4)));
+        const densityPerStep = Math.max(1, Math.floor(config.density / 10));
 
         for (let s = 0; s < steps; s++) {
           const px = pointerRef.current.lastX + (dX * (s / steps));
           const py = pointerRef.current.lastY + (dY * (s / steps));
-          for (let i = 0; i < burst / steps; i++) {
-            particlesRef.current.push(new Particle(
-              px + (Math.random() - 0.5) * 1.2,
-              py + (Math.random() - 0.5) * 1.2,
-              currentTheme,
-              colors.palette,
-              config.speed,
-              config.size
-            ));
+          particlesRef.current.push(new Particle(px, py, currentTheme, colors.palette, config.speed, config.size, false));
+          for (let i = 0; i < densityPerStep; i++) {
+            particlesRef.current.push(new Particle(px, py, currentTheme, colors.palette, config.speed, config.size, true));
           }
         }
       }
@@ -238,35 +311,46 @@ const ParticleCanvas: React.FC<ParticleCanvasProps> = ({ config, colors, current
   }, []);
 
   return (
-    <div className="relative w-full h-full bg-black">
-      <video ref={videoRef} autoPlay playsInline muted className="hidden" />
+    <div className="relative w-full h-full bg-[#0d0d0d]">
+      {/* 
+        NEW: Darkened video element for a moody atmosphere while maintaining the stable gray backdrop.
+      */}
+      {useCamera && (
+        <video 
+          ref={videoRef} 
+          autoPlay 
+          playsInline 
+          muted 
+          style={{
+            transform: 'scaleX(-1)',
+            filter: 'grayscale(100%) contrast(110%) brightness(75%)',
+            opacity: 0.35
+          }}
+          className="absolute inset-0 w-full h-full object-cover pointer-events-none z-0"
+        />
+      )}
+      
       <canvas ref={processingCanvasRef} width={PROC_WIDTH} height={PROC_HEIGHT} className="hidden" />
+      
       <canvas
         ref={canvasRef}
         onPointerMove={e => { if(!useCamera){ pointerRef.current.x = e.clientX; pointerRef.current.y = e.clientY; }}}
-        onPointerDown={e => { if(!useCamera){ pointerRef.current.isDown = true; pointerRef.current.x = e.clientX; pointerRef.current.y = e.clientY; }}}
+        onPointerDown={e => { if(!useCamera){ 
+          pointerRef.current.isDown = true; 
+          pointerRef.current.x = e.clientX; 
+          pointerRef.current.y = e.clientY; 
+          pointerRef.current.lastX = e.clientX; 
+          pointerRef.current.lastY = e.clientY; 
+        }}}
         onPointerUp={() => { if(!useCamera) pointerRef.current.isDown = false; }}
-        className="w-full h-full block cursor-crosshair"
+        onPointerLeave={() => { if(!useCamera) { pointerRef.current.x = -100; pointerRef.current.isDown = false; } }}
+        className="relative w-full h-full block z-10"
       />
       
       {useCamera && (
-        <div className="absolute top-6 left-6 w-32 h-24 border border-white/20 rounded-2xl overflow-hidden shadow-2xl z-50 pointer-events-none bg-black/40">
-          <video 
-            ref={el => { if(el && videoRef.current) el.srcObject = videoRef.current.srcObject; }} 
-            autoPlay playsInline muted 
-            className="w-full h-full object-cover scale-x-[-1] opacity-30" 
-          />
-          {trackMarker.active && (
-            <div 
-              className="absolute w-3 h-3 border border-red-500 rounded-full bg-red-500/20"
-              style={{ left: `${trackMarker.x}%`, top: `${trackMarker.y}%`, transform: 'translate(-50%, -50%)' }}
-            />
-          )}
-          <div className="absolute bottom-1 left-2 flex items-center gap-1 opacity-50">
-            <div className={`w-1 h-1 rounded-full ${trackMarker.active ? 'bg-green-400' : 'bg-red-400'}`}></div>
-            <span className="text-[7px] font-bold text-white uppercase tracking-tighter">
-              {trackMarker.active ? 'LOCKED' : 'SEARCH'}
-            </span>
+        <div className="absolute top-6 left-6 group pointer-events-none z-20">
+          <div className="px-4 py-2 border border-white/5 rounded-full bg-black/40 backdrop-blur-sm shadow-2xl">
+            <p className="text-[7px] text-white/40 uppercase tracking-[0.4em] animate-pulse">Motion Stream Locked</p>
           </div>
         </div>
       )}
